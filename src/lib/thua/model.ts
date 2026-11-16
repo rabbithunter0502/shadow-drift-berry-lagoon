@@ -1,8 +1,15 @@
 export const PRACTICE_MS = 20 * 60 * 1000;
 export const ACT_SLICE_MS = 25 * 60 * 1000;
 export const ACT_TEN_MS = 10 * 60 * 1000;
+export const URGE_MS = 10 * 60 * 1000;
 export const HOLD_MS = 24 * 60 * 60 * 1000;
 export const WAIT_MS = 48 * 60 * 60 * 1000;
+
+export const INTENTION_PRESETS = [
+  "Nếu thấy Sale → mở Thưa Chờ, không mở giỏ.",
+  "Nếu stress / chán → hít thở 10 phút trước khi mở shop.",
+  "Nếu đêm đói → uống nước, ghi muốn mua, không bấm đặt hàng.",
+] as const;
 
 export type Door = "keep" | "give" | "discard" | "hold";
 export type Trigger = "bored" | "stress" | "sale" | "reward" | "night";

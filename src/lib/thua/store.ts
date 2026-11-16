@@ -5,6 +5,7 @@ import {
   ACT_TEN_MS,
   HOLD_MS,
   PRACTICE_MS,
+  URGE_MS,
   WAIT_MS,
   suggest,
   weekId,
@@ -43,6 +44,8 @@ export type Spend = {
   at: number;
   weekId: string;
   thing: boolean;
+  forced?: boolean;
+  linkedWantId?: string | null;
 };
 
 export type Focus = {
@@ -63,6 +66,21 @@ export type ActTimer = Timer & {
   taskId: string | null;
 };
 
+/** One-in / one-out debt after bringing a thing in. */
+export type PendingOut = {
+  dueDate: string;
+  deferredOnce: boolean;
+  reason: string;
+};
+
+export type AddSpendOpts = {
+  thing?: boolean;
+  forced?: boolean;
+  linkedWantId?: string | null;
+  /** Skip creating pending-out (caller already handled). */
+  skipOut?: boolean;
+};
+
 type ThuaState = {
   weeklyCap: number | null;
   spends: Spend[];
@@ -70,20 +88,31 @@ type ThuaState = {
   wants: Want[];
   practices: string[];
   timer: Timer;
+  urge: Timer;
   focus: Focus | null;
   avoided: Avoided[];
   act: ActTimer;
+  pendingOut: PendingOut | null;
+  intentions: string[];
+  practicePrompt: boolean;
   setCap: (n: number) => void;
-  addSpend: (amount: number, note: string, thing: boolean) => void;
+  addSpend: (amount: number, note: string, opts?: AddSpendOpts) => void;
   addWant: (name: string, price: number, trigger: Trigger) => void;
   releaseWant: (id: string) => void;
   buyWant: (id: string) => boolean;
+  /** Affirm a waiting want was purchased (after 48h friction gate). */
+  settleWantPurchase: (id: string) => boolean;
   decide: (name: string, answers: Answers, door: Door) => void;
   resolveHold: (id: string, resolution: "released" | "kept") => void;
   startPractice: () => void;
   pausePractice: () => void;
   resetPractice: () => void;
   completePractice: () => void;
+  dismissPracticePrompt: () => void;
+  startUrge: () => void;
+  pauseUrge: () => void;
+  resetUrge: () => void;
+  completeUrge: () => void;
   openFocus: (name: string, next: string) => void;
   setNext: (next: string) => void;
   closeFocus: () => void;
@@ -94,13 +123,17 @@ type ThuaState = {
   resetAct: () => void;
   completeAct: () => void;
   finishAvoided: (id: string) => void;
+  setIntentions: (lines: string[]) => void;
+  releaseOut: (name: string, door: "give" | "discard") => void;
+  deferPendingOut: () => boolean;
+  clearPendingOut: () => void;
   clearAll: () => void;
 };
 
-const emptyTimer = (): Timer => ({
+const emptyTimer = (ms = PRACTICE_MS): Timer => ({
   running: false,
   startedAt: null,
-  remainingMs: PRACTICE_MS,
+  remainingMs: ms,
 });
 
 function uid(): string {
@@ -115,16 +148,24 @@ const emptyAct = (): ActTimer => ({
   taskId: null,
 });
 
+function markPendingOut(reason: string): PendingOut {
+  return { dueDate: vnDate(), deferredOnce: false, reason };
+}
+
 const initial = {
   weeklyCap: null as number | null,
   spends: [] as Spend[],
   items: [] as Item[],
   wants: [] as Want[],
   practices: [] as string[],
-  timer: emptyTimer(),
+  timer: emptyTimer(PRACTICE_MS),
+  urge: emptyTimer(URGE_MS),
   focus: null as Focus | null,
   avoided: [] as Avoided[],
   act: emptyAct(),
+  pendingOut: null as PendingOut | null,
+  intentions: [] as string[],
+  practicePrompt: false,
 };
 
 export const useThua = create<ThuaState>()(
@@ -132,7 +173,8 @@ export const useThua = create<ThuaState>()(
     (set, get) => ({
       ...initial,
       setCap: (n) => set({ weeklyCap: Math.max(0, Math.round(n)) }),
-      addSpend: (amount, note, thing) => {
+      addSpend: (amount, note, opts = {}) => {
+        const thing = opts.thing ?? false;
         const at = Date.now();
         const spend: Spend = {
           id: uid(),
@@ -141,8 +183,16 @@ export const useThua = create<ThuaState>()(
           at,
           weekId: weekId(new Date(at)),
           thing,
+          forced: opts.forced ?? false,
+          linkedWantId: opts.linkedWantId ?? null,
         };
-        set((s) => ({ spends: [spend, ...s.spends].slice(0, 200) }));
+        set((s) => ({
+          spends: [spend, ...s.spends].slice(0, 200),
+          pendingOut:
+            thing && !opts.skipOut && !opts.forced
+              ? s.pendingOut ?? markPendingOut(spend.note)
+              : s.pendingOut,
+        }));
       },
       addWant: (name, price, trigger) => {
         const createdAt = Date.now();
@@ -164,6 +214,14 @@ export const useThua = create<ThuaState>()(
       buyWant: (id) => {
         const want = get().wants.find((w) => w.id === id);
         if (!want || want.status !== "waiting" || Date.now() < want.readyAt) return false;
+        const spent = spentThisWeek(get().spends);
+        const cap = get().weeklyCap;
+        if (cap != null && spent > cap) return false;
+        return get().settleWantPurchase(id);
+      },
+      settleWantPurchase: (id) => {
+        const want = get().wants.find((w) => w.id === id);
+        if (!want || want.status !== "waiting") return false;
         const at = Date.now();
         const spend: Spend = {
           id: uid(),
@@ -172,10 +230,12 @@ export const useThua = create<ThuaState>()(
           at,
           weekId: weekId(new Date(at)),
           thing: true,
+          linkedWantId: id,
         };
         set((s) => ({
           wants: s.wants.map((w) => (w.id === id ? { ...w, status: "bought" } : w)),
           spends: [spend, ...s.spends].slice(0, 200),
+          pendingOut: s.pendingOut ?? markPendingOut(want.name),
         }));
         return true;
       },
@@ -197,7 +257,8 @@ export const useThua = create<ThuaState>()(
       resolveHold: (id, resolution) => {
         const item = get().items.find((it) => it.id === id);
         if (!item || item.door !== "hold" || item.resolved !== "open") return;
-        if (resolution === "released" && item.holdUntil != null && Date.now() < item.holdUntil) return;
+        // P0-3: both outcomes wait the full cooling-off window.
+        if (item.holdUntil != null && Date.now() < item.holdUntil) return;
         const now = Date.now();
         set((s) => ({
           items: s.items.map((it) =>
@@ -207,7 +268,7 @@ export const useThua = create<ThuaState>()(
       },
       startPractice: () =>
         set((s) => {
-          if (s.act.running) return s;
+          if (s.act.running || s.urge.running) return s;
           return {
             timer: {
               running: true,
@@ -222,14 +283,34 @@ export const useThua = create<ThuaState>()(
           const left = Math.max(0, s.timer.remainingMs - (Date.now() - s.timer.startedAt));
           return { timer: { running: false, startedAt: null, remainingMs: left } };
         }),
-      resetPractice: () => set({ timer: emptyTimer() }),
+      resetPractice: () => set({ timer: emptyTimer(PRACTICE_MS) }),
       completePractice: () =>
         set((s) => {
           if (!s.timer.running && s.timer.remainingMs === PRACTICE_MS) return s;
           const day = vnDate();
           const practices = s.practices.includes(day) ? s.practices : [...s.practices, day];
-          return { practices, timer: emptyTimer() };
+          return { practices, timer: emptyTimer(PRACTICE_MS), practicePrompt: true };
         }),
+      dismissPracticePrompt: () => set({ practicePrompt: false }),
+      startUrge: () =>
+        set((s) => {
+          if (s.timer.running || s.act.running) return s;
+          return {
+            urge: {
+              running: true,
+              startedAt: Date.now(),
+              remainingMs: s.urge.remainingMs > 0 && s.urge.remainingMs < URGE_MS ? s.urge.remainingMs : URGE_MS,
+            },
+          };
+        }),
+      pauseUrge: () =>
+        set((s) => {
+          if (!s.urge.running || s.urge.startedAt == null) return s;
+          const left = Math.max(0, s.urge.remainingMs - (Date.now() - s.urge.startedAt));
+          return { urge: { running: false, startedAt: null, remainingMs: left } };
+        }),
+      resetUrge: () => set({ urge: emptyTimer(URGE_MS) }),
+      completeUrge: () => set({ urge: emptyTimer(URGE_MS) }),
       openFocus: (name, next) =>
         set((s) => {
           if (s.focus || !name.trim() || !next.trim()) return s;
@@ -248,7 +329,7 @@ export const useThua = create<ThuaState>()(
       },
       startSlice: () =>
         set((s) => {
-          if (!s.focus || s.timer.running || !s.focus.next.trim()) return s;
+          if (!s.focus || s.timer.running || s.urge.running || !s.focus.next.trim()) return s;
           const resume = !s.act.running && s.act.kind === "slice" && s.act.remainingMs < ACT_SLICE_MS;
           return {
             act: {
@@ -263,7 +344,7 @@ export const useThua = create<ThuaState>()(
       startTen: (id) =>
         set((s) => {
           const task = s.avoided.find((a) => a.id === id && !a.done);
-          if (!task || s.timer.running) return s;
+          if (!task || s.timer.running || s.urge.running) return s;
           const resume = !s.act.running && s.act.kind === "ten" && s.act.taskId === id && s.act.remainingMs < ACT_TEN_MS;
           return {
             act: {
@@ -302,7 +383,46 @@ export const useThua = create<ThuaState>()(
         set((s) => ({
           avoided: s.avoided.map((a) => (a.id === id ? { ...a, done: true } : a)),
         })),
-      clearAll: () => set({ ...initial, timer: emptyTimer(), act: emptyAct() }),
+      setIntentions: (lines) =>
+        set({
+          intentions: lines
+            .map((l) => l.trim())
+            .filter(Boolean)
+            .slice(0, 2),
+        }),
+      releaseOut: (name, door) => {
+        const trimmed = name.trim();
+        if (!trimmed) return;
+        const now = Date.now();
+        const item: Item = {
+          id: uid(),
+          name: trimmed,
+          createdAt: now,
+          door,
+          reason: "Một vào một ra — chọn món ra sau khi đồ mới vào.",
+          holdUntil: null,
+          resolved: "released",
+          resolvedAt: now,
+        };
+        set((s) => ({
+          items: [item, ...s.items].slice(0, 80),
+          pendingOut: null,
+        }));
+      },
+      deferPendingOut: () => {
+        const pending = get().pendingOut;
+        if (!pending || pending.deferredOnce) return false;
+        set({ pendingOut: { ...pending, deferredOnce: true, dueDate: vnDate() } });
+        return true;
+      },
+      clearPendingOut: () => set({ pendingOut: null }),
+      clearAll: () =>
+        set({
+          ...initial,
+          timer: emptyTimer(PRACTICE_MS),
+          urge: emptyTimer(URGE_MS),
+          act: emptyAct(),
+        }),
     }),
     {
       name: "thua-v1",
@@ -315,9 +435,13 @@ export const useThua = create<ThuaState>()(
         wants: s.wants,
         practices: s.practices,
         timer: s.timer,
+        urge: s.urge,
         focus: s.focus,
         avoided: s.avoided,
         act: s.act,
+        pendingOut: s.pendingOut,
+        intentions: s.intentions,
+        practicePrompt: s.practicePrompt,
       }),
       merge: (persisted, current) => {
         const saved = (persisted ?? {}) as Partial<ThuaState>;
@@ -327,6 +451,10 @@ export const useThua = create<ThuaState>()(
           focus: saved.focus ?? null,
           avoided: saved.avoided ?? [],
           act: saved.act ?? emptyAct(),
+          urge: saved.urge ?? emptyTimer(URGE_MS),
+          pendingOut: saved.pendingOut ?? null,
+          intentions: saved.intentions ?? [],
+          practicePrompt: saved.practicePrompt ?? false,
         };
       },
     },
@@ -341,6 +469,28 @@ export function spentThisWeek(spends: Spend[], now = new Date()): number {
 export function flowThisWeek(items: Item[], spends: Spend[], now = new Date()) {
   const id = weekId(now);
   const inn = spends.filter((s) => s.weekId === id && s.thing).length;
-  const out = items.filter((it) => it.resolved === "released" && it.resolvedAt != null && weekId(new Date(it.resolvedAt)) === id).length;
+  const out = items.filter(
+    (it) => it.resolved === "released" && it.resolvedAt != null && weekId(new Date(it.resolvedAt)) === id,
+  ).length;
   return { inn, out };
+}
+
+export function weekTriggerStats(wants: Want[], now = new Date()) {
+  const id = weekId(now);
+  const inWeek = wants.filter((w) => weekId(new Date(w.createdAt)) === id);
+  const counts: Partial<Record<Trigger, number>> = {};
+  for (const w of inWeek) {
+    counts[w.trigger] = (counts[w.trigger] ?? 0) + 1;
+  }
+  const released = inWeek.filter((w) => w.status === "released").length;
+  const bought = inWeek.filter((w) => w.status === "bought").length;
+  const top = (Object.entries(counts) as [Trigger, number][]).sort((a, b) => b[1] - a[1])[0] ?? null;
+  return { released, bought, top, total: inWeek.length };
+}
+
+export function weekReleasedCount(items: Item[], now = new Date()): number {
+  const id = weekId(now);
+  return items.filter(
+    (it) => it.resolved === "released" && it.resolvedAt != null && weekId(new Date(it.resolvedAt)) === id,
+  ).length;
 }

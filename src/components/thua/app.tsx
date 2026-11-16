@@ -5,8 +5,10 @@ import {
   ACT_SLICE_MS,
   ACT_TEN_MS,
   DOOR_LABEL,
+  INTENTION_PRESETS,
   PRACTICE_MS,
   TRIGGERS,
+  URGE_MS,
   formatClock,
   formatMoney,
   formatRemain,
@@ -20,7 +22,13 @@ import {
   type Door,
   type Trigger,
 } from "@/lib/thua/model";
-import { flowThisWeek, spentThisWeek, useThua } from "@/lib/thua/store";
+import {
+  flowThisWeek,
+  spentThisWeek,
+  useThua,
+  weekReleasedCount,
+  weekTriggerStats,
+} from "@/lib/thua/store";
 import {
   CoinJarScene,
   DeclutterShelfScene,
@@ -28,6 +36,7 @@ import {
   ReleaseDoorScene,
   WaitBagsScene,
 } from "@/components/thua/voxel";
+import { OutSheet, PendingOutBadge } from "@/components/thua/out-sheet";
 
 type Tab = "today" | "release" | "wait" | "money" | "act";
 
@@ -67,11 +76,15 @@ function Shell() {
   const [tab, setTab] = useState<Tab>("today");
   const timer = useThua((s) => s.timer);
   const act = useThua((s) => s.act);
+  const urge = useThua((s) => s.urge);
+  const pendingOut = useThua((s) => s.pendingOut);
   const completePractice = useThua((s) => s.completePractice);
   const completeAct = useThua((s) => s.completeAct);
-  const now = useNow(timer.running || act.running);
+  const completeUrge = useThua((s) => s.completeUrge);
+  const now = useNow(timer.running || act.running || urge.running);
   const left = timerLeft(timer, now);
   const actLeft = timerLeft(act, now);
+  const urgeLeft = timerLeft(urge, now);
 
   useEffect(() => {
     if (timer.running && left <= 0) completePractice();
@@ -81,18 +94,25 @@ function Shell() {
     if (act.running && actLeft <= 0) completeAct();
   }, [act.running, actLeft, completeAct]);
 
+  useEffect(() => {
+    if (urge.running && urgeLeft <= 0) completeUrge();
+  }, [urge.running, urgeLeft, completeUrge]);
+
+  const waitDue =
+    pendingOut != null && (pendingOut.deferredOnce || pendingOut.dueDate < vnDate());
+
   return (
     <div className="min-h-dvh bg-bg text-fg">
       <main className="mx-auto w-full max-w-md px-5 pt-8 pb-28">
         {tab === "today" && <Today onJump={setTab} />}
         {tab === "release" && <Release />}
-        {tab === "wait" && <Wait />}
-        {tab === "money" && <Money />}
+        {tab === "wait" && <Wait onJump={setTab} />}
+        {tab === "money" && <Money onJump={setTab} />}
         {tab === "act" && <Act />}
       </main>
       <nav className="dock fixed inset-x-0 bottom-0 z-20 border-t border-line bg-bg" aria-label="Chính">
         <div className="mx-auto flex max-w-md">
-          <TabButton id="today" tab={tab} setTab={setTab} label="Hôm nay" icon={Sun} />
+          <TabButton id="today" tab={tab} setTab={setTab} label="Hôm nay" icon={Sun} badge={waitDue} />
           <TabButton id="act" tab={tab} setTab={setTab} label="Làm" icon={Play} />
           <TabButton id="release" tab={tab} setTab={setTab} label="Buông" icon={Feather} />
           <TabButton id="wait" tab={tab} setTab={setTab} label="Chờ" icon={Hourglass} />
@@ -109,12 +129,14 @@ function TabButton({
   setTab,
   label,
   icon: Icon,
+  badge = false,
 }: {
   id: Tab;
   tab: Tab;
   setTab: (t: Tab) => void;
   label: string;
   icon: typeof Sun;
+  badge?: boolean;
 }) {
   const on = tab === id;
   return (
@@ -123,12 +145,15 @@ function TabButton({
       aria-current={on ? "page" : undefined}
       onClick={() => setTab(id)}
       className={clsx(
-        "tap flex min-h-16 flex-1 flex-col items-center justify-center gap-1 text-xs",
+        "tap relative flex min-h-16 flex-1 flex-col items-center justify-center gap-1 text-xs",
         on ? "text-fg" : "text-muted",
       )}
     >
       <span className={clsx("h-0.5 w-4 rounded-full", on ? "bg-accent" : "bg-transparent")} />
-      <Icon className="size-5" strokeWidth={1.75} aria-hidden="true" />
+      <span className="relative">
+        <Icon className="size-5" strokeWidth={1.75} aria-hidden="true" />
+        {badge && <span className="absolute -top-0.5 -right-1 size-2 rounded-full bg-accent" aria-hidden="true" />}
+      </span>
       {label}
     </button>
   );
@@ -137,10 +162,10 @@ function TabButton({
 function Today({ onJump }: { onJump: (t: Tab) => void }) {
   const practices = useThua((s) => s.practices);
   const timer = useThua((s) => s.timer);
+  const urge = useThua((s) => s.urge);
   const startPractice = useThua((s) => s.startPractice);
   const pausePractice = useThua((s) => s.pausePractice);
   const resetPractice = useThua((s) => s.resetPractice);
-  const completePractice = useThua((s) => s.completePractice);
   const weeklyCap = useThua((s) => s.weeklyCap);
   const spends = useThua((s) => s.spends);
   const items = useThua((s) => s.items);
@@ -148,8 +173,11 @@ function Today({ onJump }: { onJump: (t: Tab) => void }) {
   const focus = useThua((s) => s.focus);
   const avoided = useThua((s) => s.avoided);
   const act = useThua((s) => s.act);
+  const practicePrompt = useThua((s) => s.practicePrompt);
+  const dismissPracticePrompt = useThua((s) => s.dismissPracticePrompt);
+  const startUrge = useThua((s) => s.startUrge);
 
-  const ticking = timer.running || act.running;
+  const ticking = timer.running || act.running || urge.running;
   const now = useNow(ticking || wants.some((w) => w.status === "waiting") || items.some((i) => i.resolved === "open"));
   const left = timerLeft(timer, now);
   const actLeft = timerLeft(act, now);
@@ -163,6 +191,9 @@ function Today({ onJump }: { onJump: (t: Tab) => void }) {
   const holds = items.filter((i) => i.resolved === "open").length;
   const waiting = wants.filter((w) => w.status === "waiting").length;
   const capLeft = weeklyCap == null ? null : weeklyCap - spent;
+  const triggers = weekTriggerStats(wants);
+  const releasedWeek = weekReleasedCount(items);
+  const overCap = weeklyCap != null && capLeft != null && capLeft < 0;
 
   const shelfProgress =
     done && !timer.running && !paused
@@ -191,6 +222,15 @@ function Today({ onJump }: { onJump: (t: Tab) => void }) {
         <p className="mt-4 max-w-xs text-lg leading-snug text-fg">Ít đồ. Ít tiền ra. Nhiều chỗ để sống.</p>
       </header>
 
+      <PendingOutBadge onJump={() => onJump("money")} />
+
+      {overCap && (
+        <div className="rounded-card border border-accent bg-accent/10 px-4 py-3">
+          <p className="text-sm text-fg">Tuần này đã vượt mức — tạm khóa “Vẫn mua” đến thứ Hai.</p>
+          <p className="mt-1 text-xs text-muted">Vẫn được ghi chi bắt buộc và bấm Không mua trên Chờ.</p>
+        </div>
+      )}
+
       <DeclutterShelfScene progress={shelfProgress} celebrating={celebrate} />
 
       <section className="rounded-card border border-line bg-surface p-5">
@@ -215,8 +255,8 @@ function Today({ onJump }: { onJump: (t: Tab) => void }) {
 
         <div className="mt-5 flex flex-col gap-2">
           {!timer.running && !paused && !done && (
-            <Btn onClick={startPractice} disabled={act.running}>
-              {act.running ? "Đang làm việc khác" : "Bắt đầu 20 phút"}
+            <Btn onClick={startPractice} disabled={act.running || urge.running}>
+              {act.running || urge.running ? "Đang làm việc khác" : "Bắt đầu 20 phút"}
             </Btn>
           )}
           {timer.running && <Btn onClick={pausePractice}>Tạm dừng</Btn>}
@@ -235,6 +275,44 @@ function Today({ onJump }: { onJump: (t: Tab) => void }) {
           )}
         </div>
       </section>
+
+      {practicePrompt && (
+        <section className="rounded-card border border-line bg-surface p-4">
+          <p className="text-xs tracking-widest text-muted uppercase">Hộc xong</p>
+          <h2 className="mt-2 font-display text-2xl leading-tight">Vừa đụng mấy món?</h2>
+          <p className="mt-2 text-sm text-muted">
+            Tuần này đã thả {releasedWeek} món. Nếu vừa thấy thứ không thuộc đời đang sống — đưa sang Buông ngay.
+          </p>
+          <div className="mt-4 flex flex-col gap-2">
+            <Btn
+              onClick={() => {
+                dismissPracticePrompt();
+                onJump("release");
+              }}
+            >
+              Mở Buông
+            </Btn>
+            <Btn tone="ghost" onClick={dismissPracticePrompt}>
+              Để sau
+            </Btn>
+          </div>
+        </section>
+      )}
+
+      {!urge.running && waiting === 0 && !act.running && (
+        <button
+          type="button"
+          onClick={() => {
+            startUrge();
+            onJump("wait");
+          }}
+          disabled={timer.running}
+          className="tap rounded-card border border-line bg-surface p-4 text-left disabled:opacity-40"
+        >
+          <p className="text-xs tracking-widest text-muted uppercase">Cưỡi cơn thèm</p>
+          <p className="mt-2 text-sm text-fg">Đang thèm — chờ 10 phút. Không mở shop.</p>
+        </button>
+      )}
 
       <ActionHint
         onJump={onJump}
@@ -273,6 +351,25 @@ function Today({ onJump }: { onJump: (t: Tab) => void }) {
           </p>
         </button>
       </div>
+
+      {triggers.total > 0 && (
+        <section className="rounded-card border border-line bg-surface p-4">
+          <p className="text-xs tracking-widest text-muted uppercase">Tuần này</p>
+          <p className="mt-2 text-sm text-fg">
+            Thả {triggers.released} · mua {triggers.bought}
+            {triggers.top
+              ? ` · hay gặp: ${TRIGGERS.find((t) => t.id === triggers.top![0])?.label ?? ""} (${triggers.top[1]})`
+              : ""}
+            .
+          </p>
+          {triggers.top?.[0] === "sale" && (
+            <p className="mt-2 text-xs text-muted">Sale đang kéo bạn — bật Chờ trước khi mở app shop.</p>
+          )}
+          {triggers.top?.[0] === "stress" && (
+            <p className="mt-2 text-xs text-muted">Stress đang kéo tay — cưỡi cơn thèm 10 phút trước khi mua.</p>
+          )}
+        </section>
+      )}
 
       {(holds > 0 || waiting > 0) && (
         <button type="button" onClick={() => onJump("wait")} className="tap rounded-card border border-line bg-surface px-4 py-4 text-left">
@@ -439,7 +536,7 @@ function Release() {
   );
 }
 
-function Wait() {
+function Wait({ onJump }: { onJump: (t: Tab) => void }) {
   const wants = useThua((s) => s.wants);
   const items = useThua((s) => s.items);
   const addWant = useThua((s) => s.addWant);
@@ -448,19 +545,40 @@ function Wait() {
   const resolveHold = useThua((s) => s.resolveHold);
   const weeklyCap = useThua((s) => s.weeklyCap);
   const spends = useThua((s) => s.spends);
+  const urge = useThua((s) => s.urge);
+  const startUrge = useThua((s) => s.startUrge);
+  const pauseUrge = useThua((s) => s.pauseUrge);
+  const resetUrge = useThua((s) => s.resetUrge);
+  const timer = useThua((s) => s.timer);
+  const act = useThua((s) => s.act);
+  const intentions = useThua((s) => s.intentions);
+  const setIntentions = useThua((s) => s.setIntentions);
 
   const openHolds = items.filter((i) => i.door === "hold" && i.resolved === "open");
   const waiting = wants.filter((w) => w.status === "waiting");
-  const active = openHolds.length > 0 || waiting.length > 0;
+  const active = openHolds.length > 0 || waiting.length > 0 || urge.running;
   const now = useNow(active);
   const spent = spentThisWeek(spends);
   const room = weeklyCap == null ? null : weeklyCap - spent;
+  const overCap = weeklyCap != null && room != null && room < 0;
+  const urgeLeft = timerLeft(urge, now);
+  const urgePaused = !urge.running && urge.remainingMs > 0 && urge.remainingMs < URGE_MS;
+  const [urgeFinished, setUrgeFinished] = useState(false);
+  const wasUrge = useRef(urge.running);
+  useEffect(() => {
+    if (wasUrge.current && !urge.running && urge.remainingMs === URGE_MS) {
+      setUrgeFinished(true);
+    }
+    wasUrge.current = urge.running;
+  }, [urge.running, urge.remainingMs]);
 
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
   const [trigger, setTrigger] = useState<Trigger>("sale");
   const [pulseKey, setPulseKey] = useState(0);
+  const [editingIntent, setEditingIntent] = useState(intentions.length === 0);
   const bagCount = openHolds.length + waiting.length;
+  const busy = timer.running || act.running;
 
   function add(e: FormEvent) {
     e.preventDefault();
@@ -468,8 +586,17 @@ function Wait() {
     if (!name.trim() || !Number.isFinite(n) || n <= 0) return;
     addWant(name, n, trigger);
     setPulseKey((k) => k + 1);
+    setUrgeFinished(false);
     setName("");
     setPrice("");
+  }
+
+  function toggleIntention(line: string) {
+    if (intentions.includes(line)) {
+      setIntentions(intentions.filter((i) => i !== line));
+    } else if (intentions.length < 2) {
+      setIntentions([...intentions, line]);
+    }
   }
 
   return (
@@ -481,9 +608,107 @@ function Wait() {
 
       <WaitBagsScene bagCount={bagCount} pulseKey={pulseKey} />
 
+      <section className="rounded-card border border-line bg-surface p-5">
+        <p className="text-xs tracking-widest text-muted uppercase">Cưỡi cơn thèm</p>
+        <h2 className="mt-2 font-display text-3xl leading-tight">Đang thèm — 10 phút.</h2>
+        <p className="mt-2 text-sm text-muted">Cơn thèm lên rồi xuống. Không mở shop. Không nhảy sang Tiền.</p>
+        {intentions.length > 0 && (
+          <ul className="mt-3 flex flex-col gap-1">
+            {intentions.map((line) => (
+              <li key={line} className="text-sm text-fg">
+                {line}
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="mt-5 font-display text-6xl tabular-nums leading-none" aria-live="polite">
+          {formatClock(urge.running || urgePaused ? urgeLeft : URGE_MS)}
+        </p>
+        <div className="mt-5 flex flex-col gap-2">
+          {!urge.running && !urgePaused && (
+            <Btn onClick={startUrge} disabled={busy}>
+              {busy ? "Đang làm việc khác" : "Bắt đầu 10 phút"}
+            </Btn>
+          )}
+          {urge.running && <Btn onClick={pauseUrge}>Tạm dừng</Btn>}
+          {urgePaused && (
+            <>
+              <Btn onClick={startUrge} disabled={busy}>
+                Tiếp tục
+              </Btn>
+              <Btn tone="ghost" onClick={resetUrge}>
+                Bỏ phiên này
+              </Btn>
+            </>
+          )}
+        </div>
+        {urgeFinished && !urge.running && !urgePaused && (
+          <div className="mt-4 flex flex-col gap-2 border-t border-line pt-4">
+            <p className="text-sm text-muted">Hết 10 phút. Còn muốn mua không?</p>
+            <Btn
+              onClick={() => {
+                setUrgeFinished(false);
+                document.getElementById("wait-form")?.scrollIntoView({ behavior: "smooth" });
+              }}
+            >
+              Để chờ 48 giờ
+            </Btn>
+            <Btn
+              tone="quiet"
+              onClick={() => {
+                setUrgeFinished(false);
+                resetUrge();
+              }}
+            >
+              Không mua
+            </Btn>
+            <Btn
+              tone="ghost"
+              onClick={() => {
+                setUrgeFinished(false);
+                startUrge();
+              }}
+            >
+              Vẫn thèm — cưỡi thêm 10 phút
+            </Btn>
+          </div>
+        )}
+      </section>
+
+      <section>
+        <h2 className="text-sm text-fg">Câu if–then</h2>
+        <p className="mt-1 text-sm text-muted">Tối đa hai câu. Hiện lại khi cưỡi cơn thèm.</p>
+        {editingIntent || intentions.length === 0 ? (
+          <div className="mt-3 flex flex-col gap-2">
+            {INTENTION_PRESETS.map((line) => (
+              <button
+                key={line}
+                type="button"
+                onClick={() => toggleIntention(line)}
+                className={clsx(
+                  "tap min-h-12 rounded-card border px-3 text-left text-sm",
+                  intentions.includes(line) ? "border-accent bg-raised text-fg" : "border-line text-muted",
+                )}
+              >
+                {line}
+              </button>
+            ))}
+            <Btn tone="ghost" onClick={() => setEditingIntent(false)}>
+              Xong
+            </Btn>
+          </div>
+        ) : (
+          <button type="button" onClick={() => setEditingIntent(true)} className="tap mt-3 text-sm text-muted">
+            Sửa câu lệnh
+          </button>
+        )}
+      </section>
+
       <section>
         <h2 className="text-sm text-fg">Túi cửa</h2>
-        <p className="mt-1 text-sm text-muted">Để món ở cửa một ngày. Hết giờ thì đưa đi, hoặc nhận lại là mình chọn giữ.</p>
+        <p className="mt-1 text-sm text-muted">
+          Hết một ngày rồi hãy nhận là mình chọn giữ. Cả “cho đi” và “giữ lại” đều chờ đủ 24 giờ.
+        </p>
         {openHolds.length === 0 ? (
           <p className="mt-3 text-sm text-muted">Túi đang trống.</p>
         ) : (
@@ -494,15 +719,16 @@ function Wait() {
               return (
                 <li key={item.id} className="rounded-card border border-line bg-surface p-4">
                   <p className="break-words text-sm">{item.name}</p>
-                  <p className="mt-1 text-xs text-muted">{formatRemain(remain)}</p>
+                  <p className="mt-1 text-xs text-muted">{due ? "Đã tới giờ quyết" : formatRemain(remain)}</p>
                   <div className="mt-3 flex gap-2">
                     <Btn className="flex-1" disabled={!due} onClick={() => resolveHold(item.id, "released")}>
                       Đã cho đi
                     </Btn>
-                    <Btn tone="quiet" className="flex-1" onClick={() => resolveHold(item.id, "kept")}>
+                    <Btn tone="quiet" className="flex-1" disabled={!due} onClick={() => resolveHold(item.id, "kept")}>
                       Giữ lại
                     </Btn>
                   </div>
+                  {!due && <p className="mt-2 text-xs text-muted">Chưa hết 24 giờ — không giữ sớm.</p>}
                 </li>
               );
             })}
@@ -510,7 +736,7 @@ function Wait() {
         )}
       </section>
 
-      <section>
+      <section id="wait-form">
         <h2 className="text-sm text-fg">48 giờ</h2>
         <p className="mt-1 text-sm text-muted">Thèm mua thì ghi ở đây. Đừng mở app shop trong lúc chờ.</p>
         <form onSubmit={add} className="mt-4 flex flex-col gap-3">
@@ -557,22 +783,37 @@ function Wait() {
                   <p className="mt-1 text-xs text-muted">
                     {triggerLabel} · {formatRemain(remain)}
                   </p>
+                  {due && (
+                    <p className="mt-2 text-xs text-muted">
+                      Vẫn muốn vì cần dùng, hay vì trigger {triggerLabel}?
+                    </p>
+                  )}
                   {due && over && room != null && (
                     <p className="mt-2 text-xs text-accent">
                       Mua món này thì vượt mức tuần {formatMoney(want.price - Math.max(0, room))}.
                     </p>
                   )}
-                  <div className="mt-3 flex gap-2">
-                    {due ? (
-                      <Btn className="flex-1" tone={over ? "quiet" : "solid"} onClick={() => buyWant(want.id)}>
-                        Vẫn mua, ghi chi
-                      </Btn>
-                    ) : (
-                      <p className="flex min-h-12 flex-1 items-center text-xs text-muted">Chưa hết 48 giờ</p>
-                    )}
-                    <Btn tone="ghost" onClick={() => releaseWant(want.id)}>
+                  {due && overCap && (
+                    <p className="mt-2 text-xs text-accent">Tuần này đã vượt mức — tạm khóa mua đến thứ Hai.</p>
+                  )}
+                  <div className="mt-3 flex flex-col gap-2">
+                    <Btn tone="solid" onClick={() => releaseWant(want.id)}>
                       Không mua
                     </Btn>
+                    {due ? (
+                      <Btn
+                        tone="quiet"
+                        disabled={overCap}
+                        onClick={() => {
+                          const ok = buyWant(want.id);
+                          if (ok) onJump("money");
+                        }}
+                      >
+                        {overCap ? "Đã khóa mua tuần này" : "Vẫn muốn — ghi chi (đồ)"}
+                      </Btn>
+                    ) : (
+                      <p className="flex min-h-12 items-center text-xs text-muted">Chưa hết 48 giờ</p>
+                    )}
                   </div>
                 </li>
               );
@@ -649,7 +890,8 @@ function Act() {
   const paused = !act.running && act.kind != null && act.remainingMs > 0;
   const openAvoided = avoided.filter((a) => !a.done);
   const today = vnDate();
-  const practiceBusy = timer.running;
+  const urge = useThua((s) => s.urge);
+  const practiceBusy = timer.running || urge.running;
 
   function createFocus(e: FormEvent) {
     e.preventDefault();
@@ -803,11 +1045,14 @@ function Act() {
   );
 }
 
-function Money() {
+function Money({ onJump }: { onJump: (t: Tab) => void }) {
   const weeklyCap = useThua((s) => s.weeklyCap);
   const setCap = useThua((s) => s.setCap);
   const spends = useThua((s) => s.spends);
+  const wants = useThua((s) => s.wants);
   const addSpend = useThua((s) => s.addSpend);
+  const addWant = useThua((s) => s.addWant);
+  const settleWantPurchase = useThua((s) => s.settleWantPurchase);
   const clearAll = useThua((s) => s.clearAll);
 
   const [capDigits, setCapDigits] = useState("");
@@ -817,11 +1062,14 @@ function Money() {
   const [thing, setThing] = useState(false);
   const [armedClear, setArmedClear] = useState(false);
   const [spendPulse, setSpendPulse] = useState(0);
+  const [gate, setGate] = useState<"idle" | "ask">("idle");
+  const [linkWantId, setLinkWantId] = useState<string | null>(null);
 
   const spent = spentThisWeek(spends);
   const weekSpends = spends.filter((s) => s.weekId === weekId());
   const left = weeklyCap == null ? null : weeklyCap - spent;
   const ratio = weeklyCap && weeklyCap > 0 ? Math.min(1, spent / weeklyCap) : Math.min(1, spent > 0 ? 0.2 : 0);
+  const waitingThings = wants.filter((w) => w.status === "waiting");
 
   function saveCap(e: FormEvent) {
     e.preventDefault();
@@ -835,11 +1083,40 @@ function Money() {
     e.preventDefault();
     const n = Number(amount);
     if (!Number.isFinite(n) || n <= 0) return;
-    addSpend(n, note, thing);
+    // P0-4: friction for things / large nonessential spends
+    const needsGate = thing || (weeklyCap != null && weeklyCap > 0 && n >= weeklyCap * 0.15);
+    if (needsGate && gate === "idle") {
+      setGate("ask");
+      return;
+    }
+    commitSpend({ forced: false, linkedWantId: linkWantId });
+  }
+
+  function commitSpend(opts: { forced: boolean; linkedWantId: string | null }) {
+    const n = Number(amount);
+    if (!Number.isFinite(n) || n <= 0) return;
+    addSpend(n, note, {
+      thing,
+      forced: opts.forced,
+      linkedWantId: opts.linkedWantId,
+    });
     setSpendPulse((k) => k + 1);
     setAmount("");
     setNote("");
     setThing(false);
+    setGate("idle");
+    setLinkWantId(null);
+  }
+
+  function sendToWait() {
+    const n = Number(amount);
+    if (!note.trim() || !Number.isFinite(n) || n <= 0) return;
+    addWant(note, n, "sale");
+    setAmount("");
+    setNote("");
+    setThing(false);
+    setGate("idle");
+    onJump("wait");
   }
 
   return (
@@ -850,6 +1127,8 @@ function Money() {
         <p className="mt-2 text-sm text-muted">Ăn cơ bản, đi lại, thuốc, hóa đơn không tính. Cà phê, sale, tự thưởng thì tính.</p>
       </header>
 
+      <OutSheet onOpenBuong={() => onJump("release")} />
+
       <CoinJarScene fill={ratio} spendPulse={spendPulse} />
 
       <section className="rounded-card border border-line bg-surface p-5">
@@ -857,7 +1136,11 @@ function Money() {
         <p className="mt-2 font-display text-5xl tabular-nums leading-none">
           {left == null ? "—" : formatMoney(Math.max(0, left))}
         </p>
-        {left != null && left < 0 && <p className="mt-2 text-sm text-accent">Vượt {formatMoney(-left)}</p>}
+        {left != null && left < 0 && (
+          <p className="mt-2 text-sm text-accent">
+            Vượt {formatMoney(-left)}. “Vẫn mua” trên Chờ tạm khóa đến thứ Hai.
+          </p>
+        )}
         {weeklyCap != null && weeklyCap > 0 && (
           <div className="mt-4 h-1 overflow-hidden rounded-full bg-raised" aria-hidden="true">
             <div className="h-full bg-accent" style={{ width: `${ratio * 100}%` }} />
@@ -882,23 +1165,64 @@ function Money() {
         )}
       </section>
 
-      <form onSubmit={saveSpend} className="flex flex-col gap-3">
-        <p className="text-sm text-muted">Đã mua rồi thì ghi, đừng giấu. Đang thèm thì sang tab Chờ, đừng ghi trước.</p>
-        <MoneyField label="Số tiền" digits={amount} onDigits={setAmount} />
-        <Field label="Là gì" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Cà phê, áo, phí ship…" />
-        <label className="flex min-h-12 items-center gap-3 text-sm">
-          <input
-            type="checkbox"
-            checked={thing}
-            onChange={(e) => setThing(e.target.checked)}
-            className="size-5"
-          />
-          Đây là đồ vật — tính vào cửa vào
-        </label>
-        <Btn type="submit" disabled={Number(amount) <= 0}>
-          Ghi chi
-        </Btn>
-      </form>
+      {gate === "ask" ? (
+        <section className="rounded-card border border-accent bg-accent/10 p-4">
+          <p className="text-sm text-fg">Đã chờ 48 giờ chưa?</p>
+          <p className="mt-2 text-xs text-muted">
+            Luật 03: thứ không thiết yếu phải chờ. Đừng lách bằng ghi chi thẳng.
+          </p>
+          {waitingThings.length > 0 && (
+            <div className="mt-3 flex flex-col gap-2">
+              <p className="text-xs text-muted">Có, đã trong Chờ:</p>
+              {waitingThings.slice(0, 4).map((w) => (
+                <button
+                  key={w.id}
+                  type="button"
+                  onClick={() => {
+                    settleWantPurchase(w.id);
+                    setSpendPulse((k) => k + 1);
+                    setAmount("");
+                    setNote("");
+                    setThing(false);
+                    setGate("idle");
+                    setLinkWantId(null);
+                  }}
+                  className="tap min-h-11 rounded-card border border-line bg-surface px-3 text-left text-sm"
+                >
+                  {w.name} · {formatMoney(w.price)}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="mt-4 flex flex-col gap-2">
+            <Btn onClick={sendToWait}>Chưa — đưa vào Chờ thay vì ghi</Btn>
+            <Btn tone="quiet" onClick={() => commitSpend({ forced: true, linkedWantId: null })}>
+              Mua bắt buộc (thuốc, hỏng, thay thế)
+            </Btn>
+            <Btn tone="ghost" onClick={() => setGate("idle")}>
+              Quay lại
+            </Btn>
+          </div>
+        </section>
+      ) : (
+        <form onSubmit={saveSpend} className="flex flex-col gap-3">
+          <p className="text-sm text-muted">Đã mua rồi thì ghi, đừng giấu. Đang thèm thì sang tab Chờ, đừng ghi trước.</p>
+          <MoneyField label="Số tiền" digits={amount} onDigits={setAmount} />
+          <Field label="Là gì" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Cà phê, áo, phí ship…" />
+          <label className="flex min-h-12 items-center gap-3 text-sm">
+            <input
+              type="checkbox"
+              checked={thing}
+              onChange={(e) => setThing(e.target.checked)}
+              className="size-5"
+            />
+            Đây là đồ vật — tính vào cửa vào
+          </label>
+          <Btn type="submit" disabled={Number(amount) <= 0}>
+            Ghi chi
+          </Btn>
+        </form>
+      )}
 
       <section>
         <p className="text-xs tracking-widest text-muted uppercase">Tuần này</p>
@@ -911,6 +1235,7 @@ function Money() {
                 <p className="min-w-0 break-words text-sm">
                   {s.note}
                   {s.thing ? <span className="text-muted"> · đồ</span> : null}
+                  {s.forced ? <span className="text-muted"> · bắt buộc</span> : null}
                 </p>
                 <p className="shrink-0 font-display tabular-nums">{formatMoney(s.amount)}</p>
               </li>
