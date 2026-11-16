@@ -22,8 +22,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
-      - run: npm ci
+      # Repo has no package-lock.json (platform workspace); npm install is required.
+      - run: npm install
       - run: npm run build:gh-pages
       - uses: actions/upload-pages-artifact@v3
         with:
