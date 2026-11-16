@@ -1,4 +1,4 @@
-import { useEffect, useState, type ButtonHTMLAttributes, type FormEvent, type InputHTMLAttributes } from "react";
+import { useEffect, useRef, useState, type ButtonHTMLAttributes, type FormEvent, type InputHTMLAttributes } from "react";
 import clsx from "clsx";
 import { Feather, Hourglass, Play, Sun, Wallet } from "lucide-react";
 import {
@@ -21,6 +21,13 @@ import {
   type Trigger,
 } from "@/lib/thua/model";
 import { flowThisWeek, spentThisWeek, useThua } from "@/lib/thua/store";
+import {
+  CoinJarScene,
+  DeclutterShelfScene,
+  FocusDeskScene,
+  ReleaseDoorScene,
+  WaitBagsScene,
+} from "@/components/thua/voxel";
 
 type Tab = "today" | "release" | "wait" | "money" | "act";
 
@@ -157,6 +164,25 @@ function Today({ onJump }: { onJump: (t: Tab) => void }) {
   const waiting = wants.filter((w) => w.status === "waiting").length;
   const capLeft = weeklyCap == null ? null : weeklyCap - spent;
 
+  const shelfProgress =
+    done && !timer.running && !paused
+      ? 1
+      : timer.running || paused
+        ? Math.min(1, Math.max(0, 1 - left / PRACTICE_MS))
+        : 0;
+
+  const [celebrate, setCelebrate] = useState(false);
+  const wasDone = useRef(done);
+  useEffect(() => {
+    if (done && !wasDone.current) {
+      setCelebrate(true);
+      const id = window.setTimeout(() => setCelebrate(false), 1800);
+      wasDone.current = done;
+      return () => window.clearTimeout(id);
+    }
+    wasDone.current = done;
+  }, [done]);
+
   return (
     <div className="flex flex-col gap-4">
       <header>
@@ -165,10 +191,19 @@ function Today({ onJump }: { onJump: (t: Tab) => void }) {
         <p className="mt-4 max-w-xs text-lg leading-snug text-fg">Ít đồ. Ít tiền ra. Nhiều chỗ để sống.</p>
       </header>
 
+      <DeclutterShelfScene progress={shelfProgress} celebrating={celebrate} />
+
       <section className="rounded-card border border-line bg-surface p-5">
         <p className="text-xs tracking-widest text-muted uppercase">Một hộc</p>
         <h2 className="mt-2 font-display text-3xl leading-tight">Một hộc. Hai mươi phút.</h2>
         <p className="mt-2 text-sm text-muted">Khóa máy cũng được. Đồng hồ chạy theo giờ thật, không theo màn hình.</p>
+        <p className="mt-2 text-xs text-muted">
+          {shelfProgress <= 0
+            ? "Kệ pixel còn đầy — bắt đầu 20 phút để thưa dần."
+            : shelfProgress >= 1
+              ? "Kệ đã trống. Chỗ thở trở lại."
+              : "Đồ trên kệ đang biến mất theo từng phút."}
+        </p>
 
         <p className="mt-5 font-display text-6xl tabular-nums leading-none" aria-live="polite">
           {formatClock(timer.running || paused ? left : PRACTICE_MS)}
@@ -273,6 +308,7 @@ function Release() {
   const [life, setLife] = useState<boolean | null>(null);
   const [override, setOverride] = useState<{ key: string; door: Door } | null>(null);
   const [note, setNote] = useState("");
+  const [doorOpen, setDoorOpen] = useState(0);
 
   const ready = name.trim().length > 0 && rebuy != null && guilt != null && life != null;
   const answers: Answers | null =
@@ -280,6 +316,15 @@ function Release() {
   const suggestion = answers ? suggest(answers) : null;
   const key = `${rebuy}-${guilt}-${life}`;
   const door = suggestion ? (override && override.key === key ? override.door : suggestion.door) : null;
+
+  useEffect(() => {
+    if (note) {
+      setDoorOpen(1);
+      const id = window.setTimeout(() => setDoorOpen(0.15), 1400);
+      return () => window.clearTimeout(id);
+    }
+    setDoorOpen(suggestion ? 0.35 : 0);
+  }, [suggestion, note]);
 
   function commit() {
     if (!ready || !answers || !door) return;
@@ -300,6 +345,8 @@ function Release() {
         <p className="text-xs tracking-widest text-muted uppercase">Buông</p>
         <h1 className="mt-2 font-display text-4xl leading-tight">Ba câu, một cửa.</h1>
       </header>
+
+      <ReleaseDoorScene doorOpen={doorOpen} />
 
       <form
         className="flex flex-col gap-5"
@@ -412,12 +459,15 @@ function Wait() {
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
   const [trigger, setTrigger] = useState<Trigger>("sale");
+  const [pulseKey, setPulseKey] = useState(0);
+  const bagCount = openHolds.length + waiting.length;
 
   function add(e: FormEvent) {
     e.preventDefault();
     const n = Number(price);
     if (!name.trim() || !Number.isFinite(n) || n <= 0) return;
     addWant(name, n, trigger);
+    setPulseKey((k) => k + 1);
     setName("");
     setPrice("");
   }
@@ -428,6 +478,8 @@ function Wait() {
         <p className="text-xs tracking-widest text-muted uppercase">Chờ</p>
         <h1 className="mt-2 font-display text-4xl leading-tight">Chưa mua, chưa vứt.</h1>
       </header>
+
+      <WaitBagsScene bagCount={bagCount} pulseKey={pulseKey} />
 
       <section>
         <h2 className="text-sm text-fg">Túi cửa</h2>
@@ -624,6 +676,8 @@ function Act() {
         <p className="mt-2 text-sm text-muted">25 phút cho việc chính, hoặc 10 phút cho thứ đang né. Kế hoạch không tính là làm.</p>
       </header>
 
+      <FocusDeskScene working={act.running} />
+
       {(act.running || paused) && (
         <section className="rounded-card border border-line bg-surface p-5">
           <p className="text-xs tracking-widest text-muted uppercase">
@@ -762,11 +816,12 @@ function Money() {
   const [note, setNote] = useState("");
   const [thing, setThing] = useState(false);
   const [armedClear, setArmedClear] = useState(false);
+  const [spendPulse, setSpendPulse] = useState(0);
 
   const spent = spentThisWeek(spends);
   const weekSpends = spends.filter((s) => s.weekId === weekId());
   const left = weeklyCap == null ? null : weeklyCap - spent;
-  const ratio = weeklyCap && weeklyCap > 0 ? Math.min(1, spent / weeklyCap) : 0;
+  const ratio = weeklyCap && weeklyCap > 0 ? Math.min(1, spent / weeklyCap) : Math.min(1, spent > 0 ? 0.2 : 0);
 
   function saveCap(e: FormEvent) {
     e.preventDefault();
@@ -781,6 +836,7 @@ function Money() {
     const n = Number(amount);
     if (!Number.isFinite(n) || n <= 0) return;
     addSpend(n, note, thing);
+    setSpendPulse((k) => k + 1);
     setAmount("");
     setNote("");
     setThing(false);
@@ -793,6 +849,8 @@ function Money() {
         <h1 className="mt-2 font-display text-4xl leading-tight">Không thiết yếu.</h1>
         <p className="mt-2 text-sm text-muted">Ăn cơ bản, đi lại, thuốc, hóa đơn không tính. Cà phê, sale, tự thưởng thì tính.</p>
       </header>
+
+      <CoinJarScene fill={ratio} spendPulse={spendPulse} />
 
       <section className="rounded-card border border-line bg-surface p-5">
         <p className="text-xs text-muted">Còn lại tuần này</p>
