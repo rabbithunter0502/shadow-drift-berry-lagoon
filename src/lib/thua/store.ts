@@ -15,6 +15,7 @@ import {
   type Timer,
   type Trigger,
 } from "@/lib/thua/model";
+import { removeReminder, upsertReminder } from "@/lib/thua/reminders";
 
 export type Item = {
   id: string;
@@ -206,11 +207,14 @@ export const useThua = create<ThuaState>()(
           status: "waiting",
         };
         set((s) => ({ wants: [want, ...s.wants].slice(0, 80) }));
+        upsertReminder({ id: want.id, kind: "want", title: want.name, at: want.readyAt });
       },
-      releaseWant: (id) =>
+      releaseWant: (id) => {
         set((s) => ({
           wants: s.wants.map((w) => (w.id === id && w.status === "waiting" ? { ...w, status: "released" } : w)),
-        })),
+        }));
+        removeReminder(id);
+      },
       buyWant: (id) => {
         const want = get().wants.find((w) => w.id === id);
         if (!want || want.status !== "waiting" || Date.now() < want.readyAt) return false;
@@ -237,6 +241,7 @@ export const useThua = create<ThuaState>()(
           spends: [spend, ...s.spends].slice(0, 200),
           pendingOut: s.pendingOut ?? markPendingOut(want.name),
         }));
+        removeReminder(id);
         return true;
       },
       decide: (name, answers, door) => {
@@ -253,6 +258,9 @@ export const useThua = create<ThuaState>()(
           resolvedAt: door === "hold" ? null : now,
         };
         set((s) => ({ items: [item, ...s.items].slice(0, 80) }));
+        if (item.holdUntil != null) {
+          upsertReminder({ id: item.id, kind: "hold", title: item.name, at: item.holdUntil });
+        }
       },
       resolveHold: (id, resolution) => {
         const item = get().items.find((it) => it.id === id);
@@ -265,6 +273,7 @@ export const useThua = create<ThuaState>()(
             it.id === id ? { ...it, resolved: resolution, resolvedAt: now } : it,
           ),
         }));
+        removeReminder(id);
       },
       startPractice: () =>
         set((s) => {

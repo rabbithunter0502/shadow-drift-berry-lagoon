@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ButtonHTMLAttributes, type FormEvent, type InputHTMLAttributes } from "react";
 import clsx from "clsx";
-import { Feather, Hourglass, Play, Sun, Wallet } from "lucide-react";
+import { Feather, Hourglass, Play, Sun, Wallet, Flame } from "lucide-react";
 import {
   ACT_SLICE_MS,
   ACT_TEN_MS,
@@ -37,6 +37,13 @@ import {
   WaitBagsScene,
 } from "@/components/thua/voxel";
 import { OutSheet, PendingOutBadge } from "@/components/thua/out-sheet";
+import { NotifOptIn } from "@/components/thua/reminders-ui";
+import {
+  countOpenDue,
+  flushDueReminders,
+  registerThuaSW,
+  upsertReminder,
+} from "@/lib/thua/reminders";
 
 type Tab = "today" | "release" | "wait" | "money" | "act";
 
@@ -78,6 +85,9 @@ function Shell() {
   const act = useThua((s) => s.act);
   const urge = useThua((s) => s.urge);
   const pendingOut = useThua((s) => s.pendingOut);
+  const items = useThua((s) => s.items);
+  const wants = useThua((s) => s.wants);
+  const startUrge = useThua((s) => s.startUrge);
   const completePractice = useThua((s) => s.completePractice);
   const completeAct = useThua((s) => s.completeAct);
   const completeUrge = useThua((s) => s.completeUrge);
@@ -98,8 +108,66 @@ function Shell() {
     if (urge.running && urgeLeft <= 0) completeUrge();
   }, [urge.running, urgeLeft, completeUrge]);
 
-  const waitDue =
+  // Deep-link: /?urge=1 or /?tab=wait&urge=1 or #urge
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const tabParam = params.get("tab");
+    const wantUrge = params.get("urge") === "1" || window.location.hash === "#urge";
+    if (tabParam === "wait" || tabParam === "today" || tabParam === "money" || tabParam === "act" || tabParam === "release") {
+      setTab(tabParam);
+    }
+    if (wantUrge) {
+      setTab("wait");
+      startUrge();
+    }
+    if (tabParam || wantUrge || window.location.hash === "#urge") {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("urge");
+      url.searchParams.delete("tab");
+      url.hash = "";
+      window.history.replaceState({}, "", url.pathname + url.search);
+    }
+  }, [startUrge]);
+
+  // Reminders: SW + backfill schedules + flush when app opens / becomes visible
+  useEffect(() => {
+    void registerThuaSW();
+    const state = useThua.getState();
+    for (const item of state.items) {
+      if (item.door === "hold" && item.resolved === "open" && item.holdUntil != null) {
+        upsertReminder({ id: item.id, kind: "hold", title: item.name, at: item.holdUntil });
+      }
+    }
+    for (const want of state.wants) {
+      if (want.status === "waiting") {
+        upsertReminder({ id: want.id, kind: "want", title: want.name, at: want.readyAt });
+      }
+    }
+    void flushDueReminders();
+    const onVis = () => {
+      if (document.visibilityState === "visible") void flushDueReminders();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    const onMsg = (event: MessageEvent) => {
+      if (event.data?.type === "thua-open") setTab("wait");
+    };
+    navigator.serviceWorker?.addEventListener("message", onMsg);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      navigator.serviceWorker?.removeEventListener("message", onMsg);
+    };
+  }, []);
+
+  const waitDueOut =
     pendingOut != null && (pendingOut.deferredOnce || pendingOut.dueDate < vnDate());
+  const waitDueTimers = countOpenDue(
+    items.filter((i) => i.door === "hold"),
+    wants,
+    now,
+  );
+  const choBadge = waitDueTimers > 0;
+  const showUrgeFab = tab !== "wait" && !urge.running && !timer.running && !act.running;
 
   return (
     <div className="min-h-dvh bg-bg text-fg">
@@ -110,12 +178,29 @@ function Shell() {
         {tab === "money" && <Money onJump={setTab} />}
         {tab === "act" && <Act />}
       </main>
+
+      {showUrgeFab && (
+        <button
+          type="button"
+          onClick={() => {
+            startUrge();
+            setTab("wait");
+          }}
+          className="tap fixed right-4 z-30 inline-flex min-h-12 items-center gap-2 rounded-card bg-accent px-4 text-sm font-medium text-accent-fg shadow-lg"
+          style={{ bottom: "calc(5.5rem + env(safe-area-inset-bottom))" }}
+          aria-label="Đang thèm — mở cưỡi cơn thèm"
+        >
+          <Flame className="size-4" strokeWidth={2} aria-hidden="true" />
+          Đang thèm
+        </button>
+      )}
+
       <nav className="dock fixed inset-x-0 bottom-0 z-20 border-t border-line bg-bg" aria-label="Chính">
         <div className="mx-auto flex max-w-md">
-          <TabButton id="today" tab={tab} setTab={setTab} label="Hôm nay" icon={Sun} badge={waitDue} />
+          <TabButton id="today" tab={tab} setTab={setTab} label="Hôm nay" icon={Sun} badge={waitDueOut} />
           <TabButton id="act" tab={tab} setTab={setTab} label="Làm" icon={Play} />
           <TabButton id="release" tab={tab} setTab={setTab} label="Buông" icon={Feather} />
-          <TabButton id="wait" tab={tab} setTab={setTab} label="Chờ" icon={Hourglass} />
+          <TabButton id="wait" tab={tab} setTab={setTab} label="Chờ" icon={Hourglass} badge={choBadge} />
           <TabButton id="money" tab={tab} setTab={setTab} label="Tiền" icon={Wallet} />
         </div>
       </nav>
@@ -299,7 +384,7 @@ function Today({ onJump }: { onJump: (t: Tab) => void }) {
         </section>
       )}
 
-      {!urge.running && waiting === 0 && !act.running && (
+      {!urge.running && !act.running && (
         <button
           type="button"
           onClick={() => {
@@ -307,10 +392,11 @@ function Today({ onJump }: { onJump: (t: Tab) => void }) {
             onJump("wait");
           }}
           disabled={timer.running}
-          className="tap rounded-card border border-line bg-surface p-4 text-left disabled:opacity-40"
+          className="tap rounded-card border border-accent/40 bg-accent/10 p-4 text-left disabled:opacity-40"
         >
-          <p className="text-xs tracking-widest text-muted uppercase">Cưỡi cơn thèm</p>
-          <p className="mt-2 text-sm text-fg">Đang thèm — chờ 10 phút. Không mở shop.</p>
+          <p className="text-xs tracking-widest text-accent uppercase">Đang thèm</p>
+          <p className="mt-2 text-sm text-fg">Chờ 10 phút. Không mở shop. Cưỡi cơn thèm rồi mới quyết.</p>
+          <p className="mt-2 text-xs text-muted">Shortcut: mở app với ?urge=1</p>
         </button>
       )}
 
@@ -607,6 +693,8 @@ function Wait({ onJump }: { onJump: (t: Tab) => void }) {
       </header>
 
       <WaitBagsScene bagCount={bagCount} pulseKey={pulseKey} />
+
+      <NotifOptIn />
 
       <section className="rounded-card border border-line bg-surface p-5">
         <p className="text-xs tracking-widest text-muted uppercase">Cưỡi cơn thèm</p>
