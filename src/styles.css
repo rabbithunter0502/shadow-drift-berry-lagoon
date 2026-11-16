@@ -70,6 +70,11 @@
   padding-bottom: env(safe-area-inset-bottom);
 }
 
+.voxel-stage canvas {
+  display: block;
+  touch-action: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
