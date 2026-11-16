@@ -1,0 +1,17 @@
+{
+  "name": "Thưa",
+  "short_name": "Thưa",
+  "id": "/shadow-drift-berry-lagoon/",
+  "start_url": "/shadow-drift-berry-lagoon/?urge=1",
+  "scope": "/shadow-drift-berry-lagoon/",
+  "display": "standalone",
+  "background_color": "#14120e",
+  "theme_color": "#14120e",
+  "icons": [
+    {
+      "src": "/shadow-drift-berry-lagoon/__grok/icon-180.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    }
+  ]
+}
