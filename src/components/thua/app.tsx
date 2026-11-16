@@ -532,6 +532,223 @@ function Wait() {
   );
 }
 
+function ActionHint({
+  onJump,
+  focusName,
+  sliceToday,
+  pushed,
+  running,
+  clock,
+}: {
+  onJump: (t: Tab) => void;
+  focusName: string | null;
+  sliceToday: boolean;
+  pushed: number;
+  running: boolean;
+  clock: string;
+}) {
+  let title = "Chưa chọn việc chính.";
+  let detail = "Mở tab Làm để đặt một việc và một bước kế tiếp.";
+  if (running) {
+    title = focusName ? `Đang làm: ${focusName}` : "Đang làm 10 phút.";
+    detail = `Còn ${clock}. Giữ nhịp, đừng mở app khác.`;
+  } else if (focusName) {
+    title = sliceToday ? `${focusName} — đã cắt lát hôm nay.` : `${focusName} đang chờ một lát.`;
+    detail =
+      pushed > 0
+        ? `${pushed} việc đang né. Sang Làm để bắt đầu.`
+        : "Một lát 25 phút hoặc ghi việc đang né.";
+  } else if (pushed > 0) {
+    title = `${pushed} việc đang né.`;
+    detail = "Mười phút bắt đầu là đủ. Không cần kế hoạch dài.";
+  }
+
+  return (
+    <button type="button" onClick={() => onJump("act")} className="tap rounded-card border border-line bg-surface p-4 text-left">
+      <p className="text-xs tracking-widest text-muted uppercase">Làm</p>
+      <p className="mt-2 text-sm leading-snug text-fg">{title}</p>
+      <p className="mt-1 text-xs text-muted">{detail}</p>
+    </button>
+  );
+}
+
+function Act() {
+  const focus = useThua((s) => s.focus);
+  const avoided = useThua((s) => s.avoided);
+  const act = useThua((s) => s.act);
+  const timer = useThua((s) => s.timer);
+  const openFocus = useThua((s) => s.openFocus);
+  const setNext = useThua((s) => s.setNext);
+  const closeFocus = useThua((s) => s.closeFocus);
+  const addAvoided = useThua((s) => s.addAvoided);
+  const finishAvoided = useThua((s) => s.finishAvoided);
+  const startSlice = useThua((s) => s.startSlice);
+  const startTen = useThua((s) => s.startTen);
+  const pauseAct = useThua((s) => s.pauseAct);
+  const resetAct = useThua((s) => s.resetAct);
+
+  const [focusName, setFocusName] = useState("");
+  const [nextStep, setNextStep] = useState("");
+  const [avoidName, setAvoidName] = useState("");
+  const [note, setNote] = useState("");
+
+  const now = useNow(act.running);
+  const left = timerLeft(act, now);
+  const paused = !act.running && act.kind != null && act.remainingMs > 0;
+  const openAvoided = avoided.filter((a) => !a.done);
+  const today = vnDate();
+  const practiceBusy = timer.running;
+
+  function createFocus(e: FormEvent) {
+    e.preventDefault();
+    openFocus(focusName, nextStep);
+    setFocusName("");
+    setNextStep("");
+  }
+
+  function createAvoided(e: FormEvent) {
+    e.preventDefault();
+    const ok = addAvoided(avoidName);
+    setNote(ok ? "" : "Tối đa 3 việc đang né.");
+    if (ok) setAvoidName("");
+  }
+
+  const defaultMs = act.kind === "ten" ? ACT_TEN_MS : ACT_SLICE_MS;
+  const shownMs = act.running || paused ? left : defaultMs;
+
+  return (
+    <div className="flex flex-col gap-5">
+      <header>
+        <p className="text-xs tracking-widest text-muted uppercase">Làm</p>
+        <h1 className="mt-2 font-display text-4xl leading-tight">Một việc. Một lát.</h1>
+        <p className="mt-2 text-sm text-muted">25 phút cho việc chính, hoặc 10 phút cho thứ đang né. Kế hoạch không tính là làm.</p>
+      </header>
+
+      {(act.running || paused) && (
+        <section className="rounded-card border border-line bg-surface p-5">
+          <p className="text-xs tracking-widest text-muted uppercase">
+            {act.kind === "ten" ? "Mười phút" : "Một lát"}
+          </p>
+          <p className="mt-2 font-display text-6xl tabular-nums leading-none" aria-live="polite">
+            {formatClock(shownMs)}
+          </p>
+          <p className="mt-3 text-sm text-muted">
+            {act.kind === "ten"
+              ? openAvoided.find((a) => a.id === act.taskId)?.name ?? "Việc đang né"
+              : focus
+                ? `Bước kế: ${focus.next}`
+                : "Đang làm"}
+          </p>
+          <div className="mt-5 flex flex-col gap-2">
+            {act.running && <Btn onClick={pauseAct}>Tạm dừng</Btn>}
+            {paused && (
+              <>
+                <Btn
+                  onClick={() => {
+                    if (act.kind === "ten" && act.taskId) startTen(act.taskId);
+                    else startSlice();
+                  }}
+                  disabled={practiceBusy}
+                >
+                  {practiceBusy ? "Đang dọn hộc" : "Tiếp tục"}
+                </Btn>
+                <Btn tone="ghost" onClick={resetAct}>
+                  Bỏ phiên này
+                </Btn>
+              </>
+            )}
+          </div>
+        </section>
+      )}
+
+      <section className="rounded-card border border-line bg-surface p-5">
+        <p className="text-xs tracking-widest text-muted uppercase">Việc chính</p>
+        {focus ? (
+          <>
+            <h2 className="mt-2 font-display text-3xl leading-tight">{focus.name}</h2>
+            <p className="mt-2 text-sm text-muted">
+              {focus.slices.includes(today) ? "Đã cắt một lát hôm nay." : "Chưa cắt lát hôm nay."}
+            </p>
+            <label className="mt-4 block">
+              <span className="mb-2 block text-sm text-muted">Bước kế tiếp</span>
+              <input
+                value={focus.next}
+                onChange={(e) => setNext(e.target.value)}
+                className="h-12 w-full rounded-card border border-line bg-raised px-4 text-base text-fg outline-none transition-colors duration-200 placeholder:text-muted focus:border-accent"
+                placeholder="Mở file, viết đoạn đầu…"
+              />
+            </label>
+            <div className="mt-4 flex flex-col gap-2">
+              {!act.running && !paused && (
+                <Btn onClick={startSlice} disabled={practiceBusy || !focus.next.trim()}>
+                  {practiceBusy ? "Đang dọn hộc" : "Bắt đầu 25 phút"}
+                </Btn>
+              )}
+              <Btn tone="ghost" onClick={closeFocus}>
+                Đổi việc chính
+              </Btn>
+            </div>
+          </>
+        ) : (
+          <form onSubmit={createFocus} className="mt-3 flex flex-col gap-3">
+            <p className="text-sm text-muted">Chọn một việc thôi. Không danh sách.</p>
+            <Field label="Việc chính" value={focusName} onChange={(e) => setFocusName(e.target.value)} placeholder="Viết, dọn, sửa…" />
+            <Field label="Bước kế tiếp" value={nextStep} onChange={(e) => setNextStep(e.target.value)} placeholder="Mở doc, xếp 5 món…" />
+            <Btn type="submit" disabled={!focusName.trim() || !nextStep.trim()}>
+              Đặt việc
+            </Btn>
+          </form>
+        )}
+      </section>
+
+      <section>
+        <h2 className="text-sm text-fg">Việc đang né</h2>
+        <p className="mt-1 text-sm text-muted">Tối đa ba. Mười phút bắt đầu — xong thì đánh dấu, chưa xong thì vẫn được.</p>
+        <form onSubmit={createAvoided} className="mt-4 flex flex-col gap-3">
+          <Field label="Việc né" value={avoidName} onChange={(e) => setAvoidName(e.target.value)} placeholder="Gọi điện, trả lời mail…" />
+          <Btn type="submit" disabled={!avoidName.trim() || openAvoided.length >= 3}>
+            Thêm
+          </Btn>
+          {note && <p className="text-sm text-muted">{note}</p>}
+        </form>
+        {openAvoided.length === 0 ? (
+          <p className="mt-4 text-sm text-muted">Chưa ghi việc nào đang né.</p>
+        ) : (
+          <ul className="mt-4 flex flex-col gap-3">
+            {openAvoided.map((task) => {
+              const started = task.starts.includes(today);
+              return (
+                <li key={task.id} className="rounded-card border border-line bg-surface p-4">
+                  <p className="break-words text-sm">{task.name}</p>
+                  <p className="mt-1 text-xs text-muted">{started ? "Đã bắt đầu hôm nay." : "Chưa đụng hôm nay."}</p>
+                  <div className="mt-3 flex gap-2">
+                    {!act.running && (
+                      <Btn
+                        className="flex-1"
+                        onClick={() => startTen(task.id)}
+                        disabled={practiceBusy || (paused && !(act.kind === "ten" && act.taskId === task.id))}
+                      >
+                        {paused && act.kind === "ten" && act.taskId === task.id
+                          ? "Tiếp tục 10 phút"
+                          : practiceBusy
+                            ? "Đang dọn hộc"
+                            : "Làm 10 phút"}
+                      </Btn>
+                    )}
+                    <Btn tone="quiet" onClick={() => finishAvoided(task.id)}>
+                      Xong
+                    </Btn>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}
+
 function Money() {
   const weeklyCap = useThua((s) => s.weeklyCap);
   const setCap = useThua((s) => s.setCap);
