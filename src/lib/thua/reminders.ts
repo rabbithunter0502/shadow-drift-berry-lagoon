@@ -42,7 +42,9 @@ export function setNotifPref(pref: NotifPref) {
 export async function registerThuaSW(): Promise<ServiceWorkerRegistration | null> {
   if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return null;
   try {
-    return await navigator.serviceWorker.register("/sw-thua.js", { scope: "/" });
+    const base = import.meta.env.BASE_URL || "/";
+    const swUrl = new URL("sw-thua.js", window.location.origin + base).pathname;
+    return await navigator.serviceWorker.register(swUrl, { scope: base });
   } catch {
     return null;
   }
@@ -114,7 +116,8 @@ export async function fireReminder(reminder: Reminder): Promise<boolean> {
     reminder.kind === "hold"
       ? `${reminder.title} — quyết đi hoặc giữ.`
       : `${reminder.title} — còn muốn không?`;
-  const url = "/?tab=wait";
+  const base = import.meta.env.BASE_URL || "/";
+  const url = `${base}?tab=wait`;
   const viaSw = await showViaSW(title, body, `thua-${reminder.kind}-${reminder.id}`, url);
   if (viaSw) return true;
   try {
