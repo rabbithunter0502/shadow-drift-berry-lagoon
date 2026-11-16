@@ -1,0 +1,769 @@
+import { useEffect, useState, type ButtonHTMLAttributes, type FormEvent, type InputHTMLAttributes } from "react";
+import clsx from "clsx";
+import { Feather, Hourglass, Play, Sun, Wallet } from "lucide-react";
+import {
+  ACT_SLICE_MS,
+  ACT_TEN_MS,
+  DOOR_LABEL,
+  PRACTICE_MS,
+  TRIGGERS,
+  formatClock,
+  formatMoney,
+  formatRemain,
+  streak,
+  suggest,
+  timerLeft,
+  vnDate,
+  vnLong,
+  weekId,
+  type Answers,
+  type Door,
+  type Trigger,
+} from "@/lib/thua/model";
+import { flowThisWeek, spentThisWeek, useThua } from "@/lib/thua/store";
+
+type Tab = "today" | "release" | "wait" | "money" | "act";
+
+const LAWS = [
+  { k: "01", t: "Một hộc, 20 phút, rồi dừng. Không dọn cả nhà." },
+  { k: "02", t: "Ba cửa: giữ, cho đi, bỏ. “Để sau” chỉ được 24 giờ ở cửa." },
+  { k: "03", t: "Thứ không thiết yếu phải chờ 48 giờ trước khi mua." },
+  { k: "04", t: "Một món vào thì một món ra." },
+  { k: "05", t: "Làm 10 phút bây giờ. Kế hoạch không tính là làm." },
+];
+
+export function ThuaApp() {
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    let on = true;
+    Promise.resolve(useThua.persist.rehydrate()).finally(() => {
+      if (on) setReady(true);
+    });
+    return () => {
+      on = false;
+    };
+  }, []);
+
+  if (!ready) {
+    return (
+      <main className="grid min-h-dvh place-items-center bg-bg">
+        <p className="font-display text-5xl text-fg">Thưa</p>
+      </main>
+    );
+  }
+
+  return <Shell />;
+}
+
+function Shell() {
+  const [tab, setTab] = useState<Tab>("today");
+  const timer = useThua((s) => s.timer);
+  const act = useThua((s) => s.act);
+  const completePractice = useThua((s) => s.completePractice);
+  const completeAct = useThua((s) => s.completeAct);
+  const now = useNow(timer.running || act.running);
+  const left = timerLeft(timer, now);
+  const actLeft = timerLeft(act, now);
+
+  useEffect(() => {
+    if (timer.running && left <= 0) completePractice();
+  }, [timer.running, left, completePractice]);
+
+  useEffect(() => {
+    if (act.running && actLeft <= 0) completeAct();
+  }, [act.running, actLeft, completeAct]);
+
+  return (
+    <div className="min-h-dvh bg-bg text-fg">
+      <main className="mx-auto w-full max-w-md px-5 pt-8 pb-28">
+        {tab === "today" && <Today onJump={setTab} />}
+        {tab === "release" && <Release />}
+        {tab === "wait" && <Wait />}
+        {tab === "money" && <Money />}
+        {tab === "act" && <Act />}
+      </main>
+      <nav className="dock fixed inset-x-0 bottom-0 z-20 border-t border-line bg-bg" aria-label="Chính">
+        <div className="mx-auto flex max-w-md">
+          <TabButton id="today" tab={tab} setTab={setTab} label="Hôm nay" icon={Sun} />
+          <TabButton id="act" tab={tab} setTab={setTab} label="Làm" icon={Play} />
+          <TabButton id="release" tab={tab} setTab={setTab} label="Buông" icon={Feather} />
+          <TabButton id="wait" tab={tab} setTab={setTab} label="Chờ" icon={Hourglass} />
+          <TabButton id="money" tab={tab} setTab={setTab} label="Tiền" icon={Wallet} />
+        </div>
+      </nav>
+    </div>
+  );
+}
+
+function TabButton({
+  id,
+  tab,
+  setTab,
+  label,
+  icon: Icon,
+}: {
+  id: Tab;
+  tab: Tab;
+  setTab: (t: Tab) => void;
+  label: string;
+  icon: typeof Sun;
+}) {
+  const on = tab === id;
+  return (
+    <button
+      type="button"
+      aria-current={on ? "page" : undefined}
+      onClick={() => setTab(id)}
+      className={clsx(
+        "tap flex min-h-16 flex-1 flex-col items-center justify-center gap-1 text-xs",
+        on ? "text-fg" : "text-muted",
+      )}
+    >
+      <span className={clsx("h-0.5 w-4 rounded-full", on ? "bg-accent" : "bg-transparent")} />
+      <Icon className="size-5" strokeWidth={1.75} aria-hidden="true" />
+      {label}
+    </button>
+  );
+}
+
+function Today({ onJump }: { onJump: (t: Tab) => void }) {
+  const practices = useThua((s) => s.practices);
+  const timer = useThua((s) => s.timer);
+  const startPractice = useThua((s) => s.startPractice);
+  const pausePractice = useThua((s) => s.pausePractice);
+  const resetPractice = useThua((s) => s.resetPractice);
+  const completePractice = useThua((s) => s.completePractice);
+  const weeklyCap = useThua((s) => s.weeklyCap);
+  const spends = useThua((s) => s.spends);
+  const items = useThua((s) => s.items);
+  const wants = useThua((s) => s.wants);
+  const focus = useThua((s) => s.focus);
+  const avoided = useThua((s) => s.avoided);
+  const act = useThua((s) => s.act);
+
+  const ticking = timer.running || act.running;
+  const now = useNow(ticking || wants.some((w) => w.status === "waiting") || items.some((i) => i.resolved === "open"));
+  const left = timerLeft(timer, now);
+  const actLeft = timerLeft(act, now);
+
+  const today = vnDate();
+  const done = practices.includes(today);
+  const days = streak(practices, today);
+  const paused = !timer.running && timer.remainingMs < PRACTICE_MS;
+  const spent = spentThisWeek(spends);
+  const flow = flowThisWeek(items, spends);
+  const holds = items.filter((i) => i.resolved === "open").length;
+  const waiting = wants.filter((w) => w.status === "waiting").length;
+  const capLeft = weeklyCap == null ? null : weeklyCap - spent;
+
+  return (
+    <div className="flex flex-col gap-4">
+      <header>
+        <p className="font-display text-5xl leading-none text-fg">Thưa</p>
+        <p className="mt-3 text-sm text-muted capitalize">{vnLong()}</p>
+        <p className="mt-4 max-w-xs text-lg leading-snug text-fg">Ít đồ. Ít tiền ra. Nhiều chỗ để sống.</p>
+      </header>
+
+      <section className="rounded-card border border-line bg-surface p-5">
+        <p className="text-xs tracking-widest text-muted uppercase">Một hộc</p>
+        <h2 className="mt-2 font-display text-3xl leading-tight">Một hộc. Hai mươi phút.</h2>
+        <p className="mt-2 text-sm text-muted">Khóa máy cũng được. Đồng hồ chạy theo giờ thật, không theo màn hình.</p>
+
+        <p className="mt-5 font-display text-6xl tabular-nums leading-none" aria-live="polite">
+          {formatClock(timer.running || paused ? left : PRACTICE_MS)}
+        </p>
+        <p className="mt-3 text-sm text-muted">
+          {done ? "Hôm nay đã giữ nhịp." : "Hôm nay chưa làm."}
+          {days > 0 ? ` ${days} ngày liên tiếp.` : ""}
+        </p>
+
+        <div className="mt-5 flex flex-col gap-2">
+          {!timer.running && !paused && !done && (
+            <Btn onClick={startPractice} disabled={act.running}>
+              {act.running ? "Đang làm việc khác" : "Bắt đầu 20 phút"}
+            </Btn>
+          )}
+          {timer.running && <Btn onClick={pausePractice}>Tạm dừng</Btn>}
+          {paused && (
+            <>
+              <Btn onClick={startPractice}>Tiếp tục</Btn>
+              <Btn tone="ghost" onClick={resetPractice}>
+                Bỏ phiên này
+              </Btn>
+            </>
+          )}
+          {!timer.running && !paused && done && (
+            <Btn tone="quiet" onClick={startPractice}>
+              Thêm một hộc
+            </Btn>
+          )}
+        </div>
+      </section>
+
+      <ActionHint
+        onJump={onJump}
+        focusName={focus?.name ?? null}
+        sliceToday={focus?.slices.includes(today) ?? false}
+        pushed={avoided.filter((a) => !a.done && !a.starts.includes(today)).length}
+        running={act.running}
+        clock={formatClock(act.running ? actLeft : 0)}
+      />
+
+      <div className="grid grid-cols-2 gap-3">
+        <button type="button" onClick={() => onJump("money")} className="tap rounded-card border border-line bg-surface p-4 text-left">
+          <p className="text-xs text-muted">Tuần này còn</p>
+          <p className="mt-2 font-display text-2xl tabular-nums leading-none">
+            {capLeft == null ? "—" : formatMoney(Math.max(0, capLeft))}
+          </p>
+          <p className="mt-2 text-xs text-muted">
+            {weeklyCap == null
+              ? "Chưa đặt mức"
+              : capLeft != null && capLeft < 0
+                ? `Vượt ${formatMoney(-capLeft)}`
+                : `trong ${formatMoney(weeklyCap)}`}
+          </p>
+        </button>
+        <button type="button" onClick={() => onJump("release")} className="tap rounded-card border border-line bg-surface p-4 text-left">
+          <p className="text-xs text-muted">Đồ vào / ra</p>
+          <p className="mt-2 font-display text-2xl tabular-nums leading-none">
+            {flow.inn} · {flow.out}
+          </p>
+          <p className="mt-2 text-xs text-muted">
+            {flow.inn === 0 && flow.out === 0
+              ? "Chưa có đồ mới"
+              : flow.out >= flow.inn
+                ? "Cửa ra đang rộng"
+                : "Đồ vào nhiều hơn ra"}
+          </p>
+        </button>
+      </div>
+
+      {(holds > 0 || waiting > 0) && (
+        <button type="button" onClick={() => onJump("wait")} className="tap rounded-card border border-line bg-surface px-4 py-4 text-left">
+          <p className="text-sm text-fg">
+            {holds > 0 ? `${holds} món trong túi cửa` : "Túi cửa đang trống"}
+            {waiting > 0 ? ` · ${waiting} thứ đang chờ mua` : ""}
+          </p>
+          <p className="mt-1 text-xs text-muted">Mở hàng chờ</p>
+        </button>
+      )}
+
+      <section className="pt-2">
+        <p className="text-xs tracking-widest text-muted uppercase">Năm luật</p>
+        <ol className="mt-3 flex flex-col">
+          {LAWS.map((law) => (
+            <li key={law.k} className="flex gap-4 border-t border-line py-3">
+              <span className="font-display text-sm text-accent">{law.k}</span>
+              <span className="text-sm leading-relaxed">{law.t}</span>
+            </li>
+          ))}
+        </ol>
+      </section>
+    </div>
+  );
+}
+
+function Release() {
+  const decide = useThua((s) => s.decide);
+  const items = useThua((s) => s.items);
+  const [name, setName] = useState("");
+  const [rebuy, setRebuy] = useState<boolean | null>(null);
+  const [guilt, setGuilt] = useState<boolean | null>(null);
+  const [life, setLife] = useState<boolean | null>(null);
+  const [override, setOverride] = useState<{ key: string; door: Door } | null>(null);
+  const [note, setNote] = useState("");
+
+  const ready = name.trim().length > 0 && rebuy != null && guilt != null && life != null;
+  const answers: Answers | null =
+    rebuy != null && guilt != null && life != null ? { rebuy, guilt, currentLife: life } : null;
+  const suggestion = answers ? suggest(answers) : null;
+  const key = `${rebuy}-${guilt}-${life}`;
+  const door = suggestion ? (override && override.key === key ? override.door : suggestion.door) : null;
+
+  function commit() {
+    if (!ready || !answers || !door) return;
+    decide(name, answers, door);
+    setNote(`${name.trim()} → ${DOOR_LABEL[door]}`);
+    setName("");
+    setRebuy(null);
+    setGuilt(null);
+    setLife(null);
+    setOverride(null);
+  }
+
+  const recent = items.slice(0, 6);
+
+  return (
+    <div className="flex flex-col gap-5">
+      <header>
+        <p className="text-xs tracking-widest text-muted uppercase">Buông</p>
+        <h1 className="mt-2 font-display text-4xl leading-tight">Ba câu, một cửa.</h1>
+      </header>
+
+      <form
+        className="flex flex-col gap-5"
+        onSubmit={(e) => {
+          e.preventDefault();
+          commit();
+        }}
+      >
+        <Field label="Món đang nắm" value={name} onChange={(e) => setName(e.target.value)} placeholder="Áo mưa, cáp, hộp giày…" />
+
+        <Choice
+          legend="Nếu mất hôm nay, mình có mua lại?"
+          value={rebuy}
+          onChange={setRebuy}
+          options={[
+            { label: "Có, mua lại", value: true },
+            { label: "Không", value: false },
+          ]}
+        />
+        <Choice
+          legend="Mình đang giữ vì điều gì?"
+          value={guilt}
+          onChange={setGuilt}
+          options={[
+            { label: "Tiếc tiền, tội lỗi", value: true },
+            { label: "Vì còn dùng", value: false },
+          ]}
+        />
+        <Choice
+          legend="Nó phục vụ đời nào?"
+          value={life}
+          onChange={setLife}
+          options={[
+            { label: "Đời đang sống", value: true },
+            { label: "Đời tưởng tượng", value: false },
+          ]}
+        />
+
+        {suggestion && door && (
+          <div className="rounded-card border border-line bg-surface p-4">
+            <p className="text-sm leading-relaxed">{suggestion.reason}</p>
+            {door !== suggestion.door && (
+              <p className="mt-2 text-xs text-muted">Đang chọn khác gợi ý. Quyết vẫn là của mình.</p>
+            )}
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              {(Object.keys(DOOR_LABEL) as Door[]).map((d) => (
+                <button
+                  key={d}
+                  type="button"
+                  onClick={() => setOverride({ key, door: d })}
+                  className={clsx(
+                    "tap min-h-12 rounded-card border text-sm",
+                    door === d ? "border-accent bg-accent text-accent-fg" : "border-line bg-raised text-fg",
+                  )}
+                >
+                  {DOOR_LABEL[d]}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <Btn type="submit" disabled={!ready}>
+          Chốt
+        </Btn>
+        {note && <p className="text-sm text-muted">{note}</p>}
+      </form>
+
+      <section>
+        <p className="text-xs tracking-widest text-muted uppercase">Vừa quyết</p>
+        {recent.length === 0 ? (
+          <p className="mt-3 text-sm text-muted">Chưa buông món nào. Bắt đầu bằng thứ đang nằm trên bàn.</p>
+        ) : (
+          <ul className="mt-2">
+            {recent.map((item) => (
+              <li key={item.id} className="border-t border-line py-3">
+                <div className="flex items-baseline justify-between gap-3">
+                  <p className="min-w-0 break-words text-sm">{item.name}</p>
+                  <p className="shrink-0 text-xs text-muted">{DOOR_LABEL[item.door]}</p>
+                </div>
+                <p className="mt-1 text-xs text-muted">
+                  {item.resolved === "open" ? "Đang ở túi cửa" : item.resolved === "kept" ? "Đã giữ" : "Đã rời đi"}
+                </p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function Wait() {
+  const wants = useThua((s) => s.wants);
+  const items = useThua((s) => s.items);
+  const addWant = useThua((s) => s.addWant);
+  const releaseWant = useThua((s) => s.releaseWant);
+  const buyWant = useThua((s) => s.buyWant);
+  const resolveHold = useThua((s) => s.resolveHold);
+  const weeklyCap = useThua((s) => s.weeklyCap);
+  const spends = useThua((s) => s.spends);
+
+  const openHolds = items.filter((i) => i.door === "hold" && i.resolved === "open");
+  const waiting = wants.filter((w) => w.status === "waiting");
+  const active = openHolds.length > 0 || waiting.length > 0;
+  const now = useNow(active);
+  const spent = spentThisWeek(spends);
+  const room = weeklyCap == null ? null : weeklyCap - spent;
+
+  const [name, setName] = useState("");
+  const [price, setPrice] = useState("");
+  const [trigger, setTrigger] = useState<Trigger>("sale");
+
+  function add(e: FormEvent) {
+    e.preventDefault();
+    const n = Number(price);
+    if (!name.trim() || !Number.isFinite(n) || n <= 0) return;
+    addWant(name, n, trigger);
+    setName("");
+    setPrice("");
+  }
+
+  return (
+    <div className="flex flex-col gap-6">
+      <header>
+        <p className="text-xs tracking-widest text-muted uppercase">Chờ</p>
+        <h1 className="mt-2 font-display text-4xl leading-tight">Chưa mua, chưa vứt.</h1>
+      </header>
+
+      <section>
+        <h2 className="text-sm text-fg">Túi cửa</h2>
+        <p className="mt-1 text-sm text-muted">Để món ở cửa một ngày. Hết giờ thì đưa đi, hoặc nhận lại là mình chọn giữ.</p>
+        {openHolds.length === 0 ? (
+          <p className="mt-3 text-sm text-muted">Túi đang trống.</p>
+        ) : (
+          <ul className="mt-3 flex flex-col gap-3">
+            {openHolds.map((item) => {
+              const remain = (item.holdUntil ?? 0) - now;
+              const due = remain <= 0;
+              return (
+                <li key={item.id} className="rounded-card border border-line bg-surface p-4">
+                  <p className="break-words text-sm">{item.name}</p>
+                  <p className="mt-1 text-xs text-muted">{formatRemain(remain)}</p>
+                  <div className="mt-3 flex gap-2">
+                    <Btn className="flex-1" disabled={!due} onClick={() => resolveHold(item.id, "released")}>
+                      Đã cho đi
+                    </Btn>
+                    <Btn tone="quiet" className="flex-1" onClick={() => resolveHold(item.id, "kept")}>
+                      Giữ lại
+                    </Btn>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+
+      <section>
+        <h2 className="text-sm text-fg">48 giờ</h2>
+        <p className="mt-1 text-sm text-muted">Thèm mua thì ghi ở đây. Đừng mở app shop trong lúc chờ.</p>
+        <form onSubmit={add} className="mt-4 flex flex-col gap-3">
+          <Field label="Thứ muốn mua" value={name} onChange={(e) => setName(e.target.value)} placeholder="Tai nghe, áo, đồ decor…" />
+          <MoneyField label="Giá" digits={price} onDigits={setPrice} />
+          <fieldset>
+            <legend className="mb-2 text-sm text-muted">Đang cảm thấy</legend>
+            <div className="flex flex-wrap gap-2">
+              {TRIGGERS.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setTrigger(t.id)}
+                  className={clsx(
+                    "tap min-h-11 rounded-full border px-3 text-sm",
+                    trigger === t.id ? "border-accent bg-accent text-accent-fg" : "border-line text-muted",
+                  )}
+                >
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </fieldset>
+          <Btn type="submit" disabled={!name.trim() || Number(price) <= 0}>
+            Để chờ
+          </Btn>
+        </form>
+
+        {waiting.length === 0 ? (
+          <p className="mt-4 text-sm text-muted">Chưa có thứ nào đang chờ.</p>
+        ) : (
+          <ul className="mt-4 flex flex-col gap-3">
+            {waiting.map((want) => {
+              const remain = want.readyAt - now;
+              const due = remain <= 0;
+              const triggerLabel = TRIGGERS.find((t) => t.id === want.trigger)?.label ?? "";
+              const over = room != null && want.price > Math.max(0, room);
+              return (
+                <li key={want.id} className="rounded-card border border-line bg-surface p-4">
+                  <div className="flex items-baseline justify-between gap-3">
+                    <p className="min-w-0 break-words text-sm">{want.name}</p>
+                    <p className="shrink-0 font-display text-lg tabular-nums">{formatMoney(want.price)}</p>
+                  </div>
+                  <p className="mt-1 text-xs text-muted">
+                    {triggerLabel} · {formatRemain(remain)}
+                  </p>
+                  {due && over && room != null && (
+                    <p className="mt-2 text-xs text-accent">
+                      Mua món này thì vượt mức tuần {formatMoney(want.price - Math.max(0, room))}.
+                    </p>
+                  )}
+                  <div className="mt-3 flex gap-2">
+                    {due ? (
+                      <Btn className="flex-1" tone={over ? "quiet" : "solid"} onClick={() => buyWant(want.id)}>
+                        Vẫn mua, ghi chi
+                      </Btn>
+                    ) : (
+                      <p className="flex min-h-12 flex-1 items-center text-xs text-muted">Chưa hết 48 giờ</p>
+                    )}
+                    <Btn tone="ghost" onClick={() => releaseWant(want.id)}>
+                      Không mua
+                    </Btn>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function Money() {
+  const weeklyCap = useThua((s) => s.weeklyCap);
+  const setCap = useThua((s) => s.setCap);
+  const spends = useThua((s) => s.spends);
+  const addSpend = useThua((s) => s.addSpend);
+  const clearAll = useThua((s) => s.clearAll);
+
+  const [capDigits, setCapDigits] = useState("");
+  const [editing, setEditing] = useState(weeklyCap == null);
+  const [amount, setAmount] = useState("");
+  const [note, setNote] = useState("");
+  const [thing, setThing] = useState(false);
+  const [armedClear, setArmedClear] = useState(false);
+
+  const spent = spentThisWeek(spends);
+  const weekSpends = spends.filter((s) => s.weekId === weekId());
+  const left = weeklyCap == null ? null : weeklyCap - spent;
+  const ratio = weeklyCap && weeklyCap > 0 ? Math.min(1, spent / weeklyCap) : 0;
+
+  function saveCap(e: FormEvent) {
+    e.preventDefault();
+    if (capDigits === "") return;
+    setCap(Number(capDigits));
+    setCapDigits("");
+    setEditing(false);
+  }
+
+  function saveSpend(e: FormEvent) {
+    e.preventDefault();
+    const n = Number(amount);
+    if (!Number.isFinite(n) || n <= 0) return;
+    addSpend(n, note, thing);
+    setAmount("");
+    setNote("");
+    setThing(false);
+  }
+
+  return (
+    <div className="flex flex-col gap-5">
+      <header>
+        <p className="text-xs tracking-widest text-muted uppercase">Tiền</p>
+        <h1 className="mt-2 font-display text-4xl leading-tight">Không thiết yếu.</h1>
+        <p className="mt-2 text-sm text-muted">Ăn cơ bản, đi lại, thuốc, hóa đơn không tính. Cà phê, sale, tự thưởng thì tính.</p>
+      </header>
+
+      <section className="rounded-card border border-line bg-surface p-5">
+        <p className="text-xs text-muted">Còn lại tuần này</p>
+        <p className="mt-2 font-display text-5xl tabular-nums leading-none">
+          {left == null ? "—" : formatMoney(Math.max(0, left))}
+        </p>
+        {left != null && left < 0 && <p className="mt-2 text-sm text-accent">Vượt {formatMoney(-left)}</p>}
+        {weeklyCap != null && weeklyCap > 0 && (
+          <div className="mt-4 h-1 overflow-hidden rounded-full bg-raised" aria-hidden="true">
+            <div className="h-full bg-accent" style={{ width: `${ratio * 100}%` }} />
+          </div>
+        )}
+        <p className="mt-3 text-sm text-muted">
+          Đã ghi {formatMoney(spent)}
+          {weeklyCap != null ? ` / ${formatMoney(weeklyCap)}` : ""}
+        </p>
+        {!editing && weeklyCap != null && (
+          <button type="button" className="tap mt-3 text-sm text-muted" onClick={() => setEditing(true)}>
+            Đổi mức tuần
+          </button>
+        )}
+        {(editing || weeklyCap == null) && (
+          <form onSubmit={saveCap} className="mt-4 flex flex-col gap-2">
+            <MoneyField label="Mức tuần" digits={capDigits} onDigits={setCapDigits} />
+            <Btn type="submit" disabled={capDigits === ""}>
+              Đặt mức
+            </Btn>
+          </form>
+        )}
+      </section>
+
+      <form onSubmit={saveSpend} className="flex flex-col gap-3">
+        <p className="text-sm text-muted">Đã mua rồi thì ghi, đừng giấu. Đang thèm thì sang tab Chờ, đừng ghi trước.</p>
+        <MoneyField label="Số tiền" digits={amount} onDigits={setAmount} />
+        <Field label="Là gì" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Cà phê, áo, phí ship…" />
+        <label className="flex min-h-12 items-center gap-3 text-sm">
+          <input
+            type="checkbox"
+            checked={thing}
+            onChange={(e) => setThing(e.target.checked)}
+            className="size-5"
+          />
+          Đây là đồ vật — tính vào cửa vào
+        </label>
+        <Btn type="submit" disabled={Number(amount) <= 0}>
+          Ghi chi
+        </Btn>
+      </form>
+
+      <section>
+        <p className="text-xs tracking-widest text-muted uppercase">Tuần này</p>
+        {weekSpends.length === 0 ? (
+          <p className="mt-3 text-sm text-muted">Chưa ghi khoản nào. Tuần tính từ thứ Hai.</p>
+        ) : (
+          <ul className="mt-2">
+            {weekSpends.map((s) => (
+              <li key={s.id} className="flex items-baseline justify-between gap-3 border-t border-line py-3">
+                <p className="min-w-0 break-words text-sm">
+                  {s.note}
+                  {s.thing ? <span className="text-muted"> · đồ</span> : null}
+                </p>
+                <p className="shrink-0 font-display tabular-nums">{formatMoney(s.amount)}</p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <div className="pt-4">
+        {armedClear ? (
+          <div className="flex gap-2">
+            <Btn
+              tone="quiet"
+              onClick={() => {
+                clearAll();
+                setArmedClear(false);
+                setEditing(true);
+              }}
+            >
+              Chắc chắn xóa
+            </Btn>
+            <Btn tone="ghost" onClick={() => setArmedClear(false)}>
+              Thôi
+            </Btn>
+          </div>
+        ) : (
+          <Btn tone="ghost" onClick={() => setArmedClear(true)}>
+            Xóa dữ liệu trên máy này
+          </Btn>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Choice({
+  legend,
+  value,
+  onChange,
+  options,
+}: {
+  legend: string;
+  value: boolean | null;
+  onChange: (v: boolean) => void;
+  options: { label: string; value: boolean }[];
+}) {
+  return (
+    <fieldset>
+      <legend className="mb-2 text-sm leading-relaxed text-fg">{legend}</legend>
+      <div className="grid grid-cols-2 gap-2">
+        {options.map((option) => (
+          <Pick key={option.label} on={value === option.value} onClick={() => onChange(option.value)}>
+            {option.label}
+          </Pick>
+        ))}
+      </div>
+    </fieldset>
+  );
+}
+
+function Pick({ on, onClick, children }: { on: boolean; onClick: () => void; children: string }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={clsx(
+        "tap min-h-12 rounded-card border px-2 text-sm",
+        on ? "border-accent bg-raised text-fg" : "border-line text-muted",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Field({ label, ...props }: { label: string } & InputHTMLAttributes<HTMLInputElement>) {
+  return (
+    <label className="block">
+      <span className="mb-2 block text-sm text-muted">{label}</span>
+      <input
+        {...props}
+        className="h-12 w-full rounded-card border border-line bg-surface px-4 text-base text-fg outline-none transition-colors duration-200 placeholder:text-muted focus:border-accent"
+      />
+    </label>
+  );
+}
+
+function MoneyField({ label, digits, onDigits }: { label: string; digits: string; onDigits: (d: string) => void }) {
+  const shown = digits ? new Intl.NumberFormat("vi-VN").format(Number(digits)) : "";
+  return (
+    <Field
+      label={label}
+      inputMode="numeric"
+      autoComplete="off"
+      placeholder="0"
+      value={shown}
+      onChange={(e) => onDigits(e.target.value.replace(/\D/g, "").slice(0, 9))}
+    />
+  );
+}
+
+function Btn({
+  tone = "solid",
+  className,
+  type = "button",
+  ...props
+}: ButtonHTMLAttributes<HTMLButtonElement> & { tone?: "solid" | "quiet" | "ghost" }) {
+  return (
+    <button
+      type={type}
+      className={clsx(
+        "tap inline-flex min-h-12 items-center justify-center rounded-card px-4 text-sm font-medium disabled:opacity-40",
+        tone === "solid" && "bg-accent text-accent-fg",
+        tone === "quiet" && "border border-line bg-raised text-fg",
+        tone === "ghost" && "text-muted",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
+
+function useNow(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [active]);
+  return active ? now : Date.now();
+}
